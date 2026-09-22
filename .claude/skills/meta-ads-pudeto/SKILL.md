@@ -1,6 +1,6 @@
 ---
 name: meta-ads-pudeto
-description: Manage Meta Ads (Facebook & Instagram) campaigns via the meta-ads-app CLI — create, optimize, analyze performance, check review status, boost organic posts, manage creatives.
+description: Manage Meta Ads (Facebook & Instagram) campaigns via the meta-ads-app CLI — create, optimize, analyze performance, check review status, boost organic posts, manage creatives. Enforces the Pudeto UTM/url_tags and campaign-naming rule on every write.
 argument-hint: "[create|optimize|analyze|review-check|boost|manage-creatives] [project or task]"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
@@ -40,6 +40,10 @@ Command reference: `/Users/martindlouhy/Projects/nastroje/meta-ads-app/README.md
 6. **Review is asynchronous.** After creating/swapping creatives, check `ad-review` (typically <24 h). A creative swap always triggers re-review.
 7. **Respect rate limits.** No parallel API fan-outs; the CLI throttles and hard-stops itself — if it does, wait, don't override.
 8. **Token care.** If any command warns about token expiry, run `token-extend --write-env` before continuing.
+9. **UTM & naming rule (ALL clients, every campaign — not only Pudeto).** Every campaign name must match `^[A-Z0-9]{2,8}_[A-Z0-9]{2,6}_(PROSPECT|RETARGET|CTWA|LEAD|CATALOG|BRAND)_[A-Z0-9]{1,8}$`, and every creative with a landing URL must carry EXACTLY this `url_tags` string (no UTM in the link itself):
+   `utm_source={{site_source_name}}&utm_medium=cpc&utm_campaign={{campaign.name}}&utm_id={{campaign.id}}&utm_content={{adset.name}}&utm_term={{ad.name}}`
+   The string mirrors the GA4 Meta data-import connector (Admin → Data import → Meta: sources fb / ig / an / msg, medium cpc, join key utm_id = campaign ID). Any other `utm_source`/`utm_medium` (e.g. the pre-2026-09-22 `facebook` / `paid-social`) or a missing `utm_id` breaks the GA4 cost ↔ session join. Never rename a live campaign, never change `utm_source`/`utm_medium`. A name that fails the regex or a creative without `url_tags` → refuse the write, propose a fix. Full rule + CLI mapping: `meta-utm-naming.md` (this folder) — MANDATORY read before any campaign/creative write.
+10. **Pre-launch GA4 gate (mandatory, never skip, never assume).** Before any campaign goes ACTIVE — and before you hand one over for manual activation — run Scenario 7 (`launch-check`). Every time, explain in plain words that GA4 joins Meta cost to sessions only when `url_tags` equals the template AND the property's Meta connector is set to fb / ig / an / msg + cpc for the right Ad Account; otherwise campaigns will not pair in GA4 and PNO per campaign is impossible. Then ask the user explicitly to confirm the connector setting (you cannot see GA4 — ask for a screenshot if in doubt). No confirmation = no activation. Connector values that differ from the template = STOP and raise it; align the connector first.
 
 ## Parse $ARGUMENTS
 
@@ -51,19 +55,22 @@ Command reference: `/Users/martindlouhy/Projects/nastroje/meta-ads-app/README.md
 | `review-check` | 4: Review / issues check |
 | `boost [post/reel]` | 5: Boost organic content |
 | `manage-creatives [project]` | 6: Creative refresh |
+| `launch-check [project]` | 7: Pre-launch GA4 gate (mandatory before any activation) |
 | (bare project name) | Quick overview: `pulse` + 1 takeaway |
 
 ## Scenario 1: CREATE campaign
 
 1. Gather: objective, audience (countries, age), budget (daily; account currency!), landing URL, creative assets, Facebook Page ID (`pages`).
-2. Present the full plan (campaign → ad set → creative → ad) and PAUSE for approval.
-3. Execute bottom-up, dry-run then `--confirm` each step:
+2. Build the campaign name as `{KLIENT}_{LOKALITA}_{TYP}_{FAZE}` and validate it against the regex (safety rule 9). Ad set / ad names: no spaces, no `&`, `=`, `?`, `#`, `/`. Check the landing URL contains no `utm_`.
+3. Present the full plan (campaign → ad set → creative → ad, incl. the exact `url_tags` string) and PAUSE for approval.
+4. Execute bottom-up, dry-run then `--confirm` each step:
    - `campaign-create --name ... --objective OUTCOME_... --daily-budget ...` (CBO: budget on campaign; then `adset-create --cbo`)
    - `adset-create --campaign-id ... --countries CZ --optimization-goal ...` (+ `--advantage-audience 1` unless the user wants manual audiences; add `--dsa-payor/--dsa-beneficiary` for EU)
    - `image-upload --file ...` / `video-upload --file ... --wait` (files > 100 MB upload chunked automatically)
-   - `creative-create --type link ... --page-id ...` (ask whether Advantage+ enhancements are wanted — `--no-enhancements` opts out of all 14; without it Meta's defaults apply, typically ON)
+   - `creative-create --type link ... --page-id ... --url-tags '<template from rule 9>'` (`--url-tags` is mandatory whenever `--link` is set; ask whether Advantage+ enhancements are wanted — `--no-enhancements` opts out of all 14; without it Meta's defaults apply, typically ON)
    - `ad-create --adset-id ... --creative-id ...`
-4. Verify: `preview --ad-id ... --out preview.html`, then `ad-review --ad-id ...`. Activation only on explicit request.
+5. Verify: `preview --ad-id ... --out preview.html`, then `ad-review --ad-id ...`, and `creative-detail` to confirm `url_tags` landed verbatim. Activation only on explicit request AND only after Scenario 7 (`launch-check`) passed.
+6. Audit record: list campaign ID, name and the `url_tags` used. Remind the user of the 24 h GA4 join check (rule §5 in `meta-utm-naming.md`).
 
 ## Scenario 2: OPTIMIZE
 
@@ -89,17 +96,29 @@ Command reference: `/Users/martindlouhy/Projects/nastroje/meta-ads-app/README.md
 - **Facebook post**: `creative-from-post --post-id <PAGEID_POSTID> --name ...` (optional `--call-to-action LEARN_MORE --link ...`), then `ad-create`.
 - **Instagram post/Reel**: `ig-media` to list media with IDs → `creative-from-ig --media-id ... --name ...` → `ad-create`. Media with copyrighted music can't be boosted.
 - Both take `--no-enhancements` when Meta's automatic Advantage+ edits are unwanted (default: Meta's defaults, typically ON).
+- Neither command has `--url-tags`. If the boosted creative has a landing link (e.g. `--link` with a CTA), the UTM rule applies: after creation check `creative-detail`, and tell the user the `url_tags` must be added in Ads Manager (Tracking → URL parameters) or rebuild via `creative-create --url-tags`. Pure post/Reel boosts without a web link are exempt (rule §7). The campaign name still follows the naming schema.
 - Preview before going anywhere near ACTIVE: `preview --creative-id ... --format INSTAGRAM_STANDARD --out preview.html`.
 
 ## Scenario 6: MANAGE CREATIVES
 
-1. `ads --campaign-id ... --json` + `creative-detail --creative-id ...` to map what runs.
-2. Simple creative → `creative-create` (`--no-enhancements` = all 14 Advantage+ features OPT_OUT). FLEX creative from scratch → `creative-create --type flex` with repeated `--message`/`--headline` (max 5) and repeated `--image-hash`/`--video-id`; identity via `--ig-user-id` or `--no-enhancements` (PBIA). Lead ads → `--lead-gen-form-id` (link/video; requires `--link`, `http://fb.me/` works). Advantage+ media/URL swap → `creative-clone` (carries url_tags/UTM, handles unique-image-hash and deprecated degrees_of_freedom_spec automatically; `--swap-on-ad` swaps in one step).
+1. `ads --campaign-id ... --json` + `creative-detail --creative-id ...` to map what runs. While mapping, audit `url_tags` against the template (string-equal; `ads` does not return it — use `ad-detail --json` per ad, sequentially, or the audit script in `meta-utm-naming.md`) and links for stray `utm_`; list non-compliant ads and propose fixes — never rewrite them without approval.
+2. Simple creative → `creative-create` (`--no-enhancements` = all 14 Advantage+ features OPT_OUT). FLEX creative from scratch → `creative-create --type flex` with repeated `--message`/`--headline` (max 5) and repeated `--image-hash`/`--video-id`; identity via `--ig-user-id` or `--no-enhancements` (PBIA). Lead ads → `--lead-gen-form-id` (link/video; requires `--link`, `http://fb.me/` works). Advantage+ media/URL swap → `creative-clone` (carries url_tags/UTM, handles unique-image-hash and deprecated degrees_of_freedom_spec automatically; `--swap-on-ad` swaps in one step). Check the dry-run shows the template `url_tags`; if the source was non-compliant, pass `--url-tags '<template>'` explicitly.
 3. Text edits inside asset_feed_spec → read `meta-creative-editing.md` (in this skill folder) for the full preservation rules.
 4. After any swap: re-review runs — check `ad-review`.
 
+## Scenario 7: LAUNCH CHECK (GA4 gate — run before every activation)
+
+Applies to every client and every campaign. Never skip it, never assume it was done earlier.
+
+1. **Explain why, every time**, in one short paragraph: GA4 imports Meta cost through the Meta connector and joins it on `utm_id` = campaign ID plus `utm_source`/`utm_medium` equal to the connector values (fb / ig / an / msg + cpc). Any other value puts cost and sessions on two separate rows and PNO per campaign cannot be computed.
+2. **Ask the user to confirm the connector** for the property in question (GA4 Admin → Data import → Meta): correct Ad Account, sources `fb` / `ig` / `an` / `msg`, medium `cpc`, import schedule running, authorization not expired. Pudeto reference: Business Center *Pudeto*, Ad Account `1679873289154726`. Ask for a screenshot when unsure. Values that differ from the template → STOP, report it, do not launch until connector and template agree (fix the connector, not the template).
+3. **Audit the campaign** with the script in `meta-utm-naming.md` §9 (sequential, rate-limit aware): every ad must show `OK` (template verbatim) and no link may contain `utm_`. List non-compliant ads and propose the fix (`creative-clone --url-tags '<template>' --swap-on-ad`, triggers re-review) — do not rewrite without approval.
+4. **Validate the campaign name** against the regex (rule 9).
+5. Only after all four are green and the user explicitly says so: activation (dry-run → `--confirm`). Then the 24 h GA4 join check (`meta-utm-naming.md` §6).
+
 ## Load Reference Documents
 
+- `meta-utm-naming.md` (this folder) — MANDATORY before any campaign/creative write: naming schema + regex, the single allowed `url_tags` string, pre-write checklist, CLI mapping and audit one-liner.
 - `meta-creative-editing.md` (this folder) — MANDATORY before touching asset_feed_spec / Advantage+ creatives.
 - `/Users/martindlouhy/Projects/nastroje/meta-ads-app/docs/api-notes.md` — API quirks; read when an API call fails unexpectedly.
 - If the user has added their own strategy/know-how document to this skill folder, load it too — it takes precedence over generic guidance here.
